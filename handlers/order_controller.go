@@ -31,11 +31,22 @@ func (o *OrderServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/order/all/" {
-		orders, _ := o.store.GetOrdersByCustomerID(authResponse.ID)
-		json.NewEncoder(w).Encode(orders)
-	} else if r.URL.Path == "/order/current/" {
-		orders, _ := o.store.GetCurrentOrdersByCustomerID(authResponse.ID)
-		json.NewEncoder(w).Encode(orders)
+	switch r.Method {
+	case http.MethodGet:
+		if r.URL.Path == "/order/all" {
+			o.getAllOrders(w, r, authResponse)
+		} else if r.URL.Path == "/order/current" {
+			o.getCurrentOrders(w, r, authResponse)
+		}
 	}
+}
+
+func (o *OrderServer) getAllOrders(w http.ResponseWriter, r *http.Request, authResponse AuthResponse) {
+	orders, _ := o.store.GetOrdersByCustomerID(authResponse.ID)
+	json.NewEncoder(w).Encode(orders)
+}
+
+func (o *OrderServer) getCurrentOrders(w http.ResponseWriter, r *http.Request, authResponse AuthResponse) {
+	orders, _ := o.store.GetCurrentOrdersByCustomerID(authResponse.ID)
+	json.NewEncoder(w).Encode(orders)
 }
