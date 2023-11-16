@@ -12,6 +12,19 @@ import (
 	"github.com/VitoNaychev/bt-order-svc/testdata"
 )
 
+type StubAddressStore struct {
+	addresses []models.Address
+}
+
+func (s *StubAddressStore) GetAddressByID(id int) (models.Address, error) {
+	for _, address := range s.addresses {
+		if address.ID == id {
+			return address, nil
+		}
+	}
+	return models.Address{}, models.ErrNotFound
+}
+
 type StubOrderStore struct {
 	orders []models.Order
 }
@@ -36,7 +49,11 @@ func (s *StubOrderStore) GetCurrentOrdersByCustomerID(customerID int) ([]models.
 	return customerOrders, nil
 }
 
-func StubVerifyJWT(jwt string) AuthResponse {
+func dummyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func stubVerifyJWT(jwt string) AuthResponse {
 	if jwt == "invalidJWT" {
 		return AuthResponse{INVALID, 0}
 	} else if jwt == "10" {
@@ -47,43 +64,93 @@ func StubVerifyJWT(jwt string) AuthResponse {
 	}
 }
 
-func TestGetCurrentOrders(t *testing.T) {
-	store := &StubOrderStore{[]models.Order{testdata.PeterOrder1, testdata.PeterOrder2, testdata.AliceOrder}}
-	server := OrderServer{store, StubVerifyJWT}
+func TestAuthMiddleware(t *testing.T) {
+	handler := AuthMiddleware(dummyHandler, stubVerifyJWT)
 
 	t.Run("returns Unauthorized on missing JWT", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/current/", nil)
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		response := httptest.NewRecorder()
 
-		server.ServeHTTP(response, request)
+		handler(response, request)
 
 		assertStatus(t, response.Code, http.StatusUnauthorized)
 	})
 
 	t.Run("returns Unauthorized on invalid JWT", func(t *testing.T) {
 		customerJWT := "invalidJWT"
-		request, _ := http.NewRequest(http.MethodGet, "/order/current/", nil)
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		request.Header.Add("Token", customerJWT)
 
 		response := httptest.NewRecorder()
 
-		server.ServeHTTP(response, request)
+		handler(response, request)
 
 		assertStatus(t, response.Code, http.StatusUnauthorized)
 	})
 
-	t.Run("returns current orders for customer with ID 1", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/current/", nil)
+	t.Run("returns Not Found on nonexistent customer", func(t *testing.T) {
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Add("Token", strconv.Itoa(10))
+		response := httptest.NewRecorder()
+
+		handler(response, request)
+
+		assertStatus(t, response.Code, http.StatusNotFound)
+	})
+
+	t.Run("returns Accepted on authentic customer", func(t *testing.T) {
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		request.Header.Add("Token", strconv.Itoa(testdata.PeterCustomerID))
+		response := httptest.NewRecorder()
+
+		handler(response, request)
+
+		assertStatus(t, response.Code, http.StatusAccepted)
+	})
+}
+
+func TestOrderEndpointAuthentication(t *testing.T) {
+	orderStore := &StubOrderStore{}
+	addressStore := &StubAddressStore{}
+	server := NewOrderServer(orderStore, addressStore, stubVerifyJWT)
+
+	invalidJWT := "invalidJWT"
+	cases := map[string]*http.Request{
+		"get all orders authentication":    NewGetAllOrdersRequest(invalidJWT),
+		"get current order authentication": NewGetCurrentOrdersRequest(invalidJWT),
+	}
+
+	for name, request := range cases {
+		t.Run(name, func(t *testing.T) {
+			request.Header.Add("Token", invalidJWT)
+
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			assertStatus(t, response.Code, http.StatusUnauthorized)
+		})
+	}
+}
+
+func TestGetCurrentOrders(t *testing.T) {
+	orderStore := &StubOrderStore{[]models.Order{testdata.PeterOrder1, testdata.PeterOrder2, testdata.AliceOrder}}
+	addressStore := &StubAddressStore{[]models.Address{testdata.ChickenShackAddress, testdata.PeterAddress1, testdata.PeterAddress2, testdata.AliceAddress}}
+	server := NewOrderServer(orderStore, addressStore, stubVerifyJWT)
+
+	t.Run("returns current orders for customer with ID 1", func(t *testing.T) {
+		request := NewGetCurrentOrdersRequest(strconv.Itoa(testdata.PeterCustomerID))
 		response := httptest.NewRecorder()
 
 		server.ServeHTTP(response, request)
 
 		assertStatus(t, response.Code, http.StatusOK)
 
-		want := []models.Order{testdata.PeterOrder1}
+		want := []GetOrderResponse{
+			NewGetOrderResponse(testdata.PeterOrder1, testdata.ChickenShackAddress, testdata.PeterAddress1),
+		}
 
-		var got []models.Order
+		var got []GetOrderResponse
 		json.NewDecoder(response.Body).Decode(&got)
 
 		if !reflect.DeepEqual(got, want) {
@@ -92,43 +159,31 @@ func TestGetCurrentOrders(t *testing.T) {
 	})
 }
 
+func NewGetCurrentOrdersRequest(jwt string) *http.Request {
+	request, _ := http.NewRequest(http.MethodGet, "/order/current/", nil)
+	request.Header.Add("Token", jwt)
+
+	return request
+}
+
 func TestGetOrders(t *testing.T) {
-	store := &StubOrderStore{[]models.Order{testdata.PeterOrder1, testdata.PeterOrder2, testdata.AliceOrder}}
-	server := OrderServer{store, StubVerifyJWT}
-
-	t.Run("returns Unauthorized on missing JWT", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
-		response := httptest.NewRecorder()
-
-		server.ServeHTTP(response, request)
-
-		assertStatus(t, response.Code, http.StatusUnauthorized)
-	})
-
-	t.Run("returns Unauthorized on invalid JWT", func(t *testing.T) {
-		customerJWT := "invalidJWT"
-		request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
-		request.Header.Add("Token", customerJWT)
-
-		response := httptest.NewRecorder()
-
-		server.ServeHTTP(response, request)
-
-		assertStatus(t, response.Code, http.StatusUnauthorized)
-	})
+	orderStore := &StubOrderStore{[]models.Order{testdata.PeterOrder1, testdata.PeterOrder2, testdata.AliceOrder}}
+	addressStore := &StubAddressStore{[]models.Address{testdata.ChickenShackAddress, testdata.PeterAddress1, testdata.PeterAddress2, testdata.AliceAddress}}
+	server := NewOrderServer(orderStore, addressStore, stubVerifyJWT)
 
 	t.Run("returns orders of customer with ID 1", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
-		request.Header.Add("Token", strconv.Itoa(testdata.PeterCustomerID))
+		request := NewGetAllOrdersRequest(strconv.Itoa(testdata.PeterCustomerID))
 		response := httptest.NewRecorder()
 
 		server.ServeHTTP(response, request)
 
 		assertStatus(t, response.Code, http.StatusOK)
 
-		want := []models.Order{testdata.PeterOrder1, testdata.PeterOrder2}
-
-		var got []models.Order
+		want := []GetOrderResponse{
+			NewGetOrderResponse(testdata.PeterOrder1, testdata.ChickenShackAddress, testdata.PeterAddress1),
+			NewGetOrderResponse(testdata.PeterOrder2, testdata.ChickenShackAddress, testdata.PeterAddress2),
+		}
+		var got []GetOrderResponse
 		json.NewDecoder(response.Body).Decode(&got)
 
 		if !reflect.DeepEqual(got, want) {
@@ -137,32 +192,23 @@ func TestGetOrders(t *testing.T) {
 	})
 
 	t.Run("returns orders of customer with ID 2", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
-		request.Header.Add("Token", strconv.Itoa(testdata.AliceCustomerID))
+		request := NewGetAllOrdersRequest(strconv.Itoa(testdata.AliceCustomerID))
 		response := httptest.NewRecorder()
 
 		server.ServeHTTP(response, request)
 
 		assertStatus(t, response.Code, http.StatusOK)
 
-		want := []models.Order{testdata.AliceOrder}
+		want := []GetOrderResponse{
+			NewGetOrderResponse(testdata.AliceOrder, testdata.ChickenShackAddress, testdata.AliceAddress),
+		}
 
-		var got []models.Order
+		var got []GetOrderResponse
 		json.NewDecoder(response.Body).Decode(&got)
 
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %v want %v", got, want)
 		}
-	})
-
-	t.Run("returns Not Found on nonexistent customer", func(t *testing.T) {
-		request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
-		request.Header.Add("Token", strconv.Itoa(10))
-		response := httptest.NewRecorder()
-
-		server.ServeHTTP(response, request)
-
-		assertStatus(t, response.Code, http.StatusNotFound)
 	})
 }
 
@@ -172,4 +218,11 @@ func assertStatus(t testing.TB, got, want int) {
 	if got != want {
 		t.Fatalf("got status %v want %v", got, want)
 	}
+}
+
+func NewGetAllOrdersRequest(jwt string) *http.Request {
+	request, _ := http.NewRequest(http.MethodGet, "/order/all/", nil)
+	request.Header.Add("Token", jwt)
+
+	return request
 }
